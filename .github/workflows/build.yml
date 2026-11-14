@@ -1,0 +1,82 @@
+name: Build CAD Mobile APK
+
+on:
+  workflow_dispatch:          # กดปุ่ม Run เองได้
+  push:
+    branches: [ main ]        # build ใหม่ทุกครั้งที่แก้โค้ด
+  schedule:
+    - cron: "0 2 * * 1"       # ทุกวันจันทร์ ดึง CADCraft เวอร์ชันล่าสุดมา build
+
+permissions:
+  contents: write             # ต้องใช้เพื่อสร้างหน้า Release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Download latest CADCraft web build (+ verify checksum)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dl && cd dl
+          gh release download --repo storytold/cadcraft \
+            --pattern '*web*.zip' --pattern 'SHA256SUMS.txt'
+          ls -la
+          sha256sum -c --ignore-missing SHA256SUMS.txt
+          gh release view --repo storytold/cadcraft --json tagName -q .tagName > ../CADCRAFT_VERSION
+          echo "CADCraft version: $(cat ../CADCRAFT_VERSION)"
+
+      - name: Put web build into Android assets
+        run: |
+          mkdir -p web && unzip -q dl/*web*.zip -d web
+          IDX=$(find web -name index.html | head -n 1)
+          test -n "$IDX" || { echo "ไม่พบ index.html ในไฟล์ zip"; exit 1; }
+          DEST=app/src/main/assets/cadcraft
+          mkdir -p "$DEST"
+          cp -r "$(dirname "$IDX")"/. "$DEST"/
+          cp web-extras/android-bridge.js "$DEST"/
+          sed -i '0,/<head[^>]*>/s//&\n<script src="android-bridge.js"><\/script>/' "$DEST/index.html"
+          grep -n "android-bridge.js" "$DEST/index.html"
+
+      - name: Decode signing key (optional)
+        if: env.KS_B64 != ''
+        run: |
+          echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
+      - name: Build APK
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: gradle assembleRelease --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cad-mobile-apk
+          path: app/build/outputs/apk/release/*.apk
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=$(cat CADCRAFT_VERSION)
+          gh release create "build-${{ github.run_number }}" \
+            app/build/outputs/apk/release/*.apk \
+            --title "CAD Mobile #${{ github.run_number }} (CADCraft $V)" \
+            --notes "Built automatically from CADCraft $V"
