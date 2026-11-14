@@ -1,14 +1,14 @@
 name: Build CAD Mobile APK
 
 on:
-  workflow_dispatch:          # กดปุ่ม Run เองได้
+  workflow_dispatch:
   push:
-    branches: [ main ]        # build ใหม่ทุกครั้งที่แก้โค้ด
+    branches: [ main ]
   schedule:
-    - cron: "0 2 * * 1"       # ทุกวันจันทร์ ดึง CADCraft เวอร์ชันล่าสุดมา build
+    - cron: "0 2 * * 1"
 
 permissions:
-  contents: write             # ต้องใช้เพื่อสร้างหน้า Release
+  contents: write
 
 jobs:
   build:
@@ -17,6 +17,29 @@ jobs:
       KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Locate Android project (หาโฟลเดอร์โปรเจกต์ให้อัตโนมัติ)
+        run: |
+          echo "================ ไฟล์ทั้งหมดใน repo ================"
+          find . -maxdepth 6 -not -path './.git*' | sort
+          echo "===================================================="
+          SETTINGS=$(find . -name 'settings.gradle.kts' -not -path './.git/*' | head -n 1)
+          if [ -z "$SETTINGS" ]; then
+            echo "::error::ไม่พบไฟล์ settings.gradle.kts ใน repo เลย (ดูรายชื่อไฟล์ด้านบน ชื่อไฟล์อาจสะกดผิด เช่นมี .txt ต่อท้าย)"
+            exit 1
+          fi
+          PROJ=$(dirname "$SETTINGS")
+          echo "พบโปรเจกต์ที่: $PROJ"
+          echo "PROJ=$PROJ" >> "$GITHUB_ENV"
+          MISSING=""
+          for f in settings.gradle.kts build.gradle.kts gradle.properties app/build.gradle.kts \
+                   app/src/main/AndroidManifest.xml \
+                   app/src/main/java/com/example/cadmobile/MainActivity.kt \
+                   app/src/main/java/com/example/cadmobile/WasmAssetsHandler.kt \
+                   web-extras/android-bridge.js web-extras/pen-support.js; do
+            if [ -f "$PROJ/$f" ]; then echo "OK      $f"; else echo "MISSING $f"; MISSING=1; fi
+          done
+          if [ -n "$MISSING" ]; then echo "::error::มีไฟล์หายหรือวางผิดตำแหน่ง (ดูรายการ MISSING ด้านบน)"; exit 1; fi
 
       - uses: actions/setup-java@v4
         with:
@@ -31,26 +54,27 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p dl && cd dl
+          mkdir -p "$RUNNER_TEMP/dl" && cd "$RUNNER_TEMP/dl"
           gh release download --repo storytold/cadcraft \
             --pattern '*web*.zip' --pattern 'SHA256SUMS.txt'
           ls -la
           sha256sum -c --ignore-missing SHA256SUMS.txt
-          gh release view --repo storytold/cadcraft --json tagName -q .tagName > ../CADCRAFT_VERSION
-          echo "CADCraft version: $(cat ../CADCRAFT_VERSION)"
+          gh release view --repo storytold/cadcraft --json tagName -q .tagName > "$RUNNER_TEMP/CADCRAFT_VERSION"
+          echo "CADCraft version: $(cat "$RUNNER_TEMP/CADCRAFT_VERSION")"
 
       - name: Put web build into Android assets
         run: |
-          mkdir -p web && unzip -q dl/*web*.zip -d web
-          IDX=$(find web -name index.html | head -n 1)
-          test -n "$IDX" || { echo "ไม่พบ index.html ในไฟล์ zip"; exit 1; }
-          DEST=app/src/main/assets/cadcraft
+          WEB="$RUNNER_TEMP/web"
+          mkdir -p "$WEB" && unzip -q "$RUNNER_TEMP"/dl/*web*.zip -d "$WEB"
+          IDX=$(find "$WEB" -name index.html | head -n 1)
+          test -n "$IDX" || { echo "::error::ไม่พบ index.html ในไฟล์ zip ของ CADCraft"; exit 1; }
+          DEST="$PROJ/app/src/main/assets/cadcraft"
           mkdir -p "$DEST"
           cp -r "$(dirname "$IDX")"/. "$DEST"/
-          cp web-extras/android-bridge.js "$DEST"/
-          cp web-extras/pen-support.js "$DEST"/
+          cp "$PROJ/web-extras/android-bridge.js" "$DEST"/
+          cp "$PROJ/web-extras/pen-support.js" "$DEST"/
           sed -i '0,/<head[^>]*>/s//&\n<script src="android-bridge.js"><\/script>\n<script src="pen-support.js"><\/script>/' "$DEST/index.html"
-          grep -n "android-bridge.js" "$DEST/index.html"
+          grep -n -E "android-bridge.js|pen-support.js" "$DEST/index.html"
 
       - name: Decode signing key (optional)
         if: env.KS_B64 != ''
@@ -63,19 +87,19 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: gradle assembleRelease --no-daemon
+        run: gradle -p "$PROJ" assembleRelease --no-daemon
 
       - uses: actions/upload-artifact@v4
         with:
           name: cad-mobile-apk
-          path: app/build/outputs/apk/release/*.apk
+          path: ${{ env.PROJ }}/app/build/outputs/apk/release/*.apk
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          V=$(cat CADCRAFT_VERSION)
+          V=$(cat "$RUNNER_TEMP/CADCRAFT_VERSION")
           gh release create "build-${{ github.run_number }}" \
-            app/build/outputs/apk/release/*.apk \
+            "$PROJ"/app/build/outputs/apk/release/*.apk \
             --title "CAD Mobile #${{ github.run_number }} (CADCraft $V)" \
             --notes "Built automatically from CADCraft $V"
