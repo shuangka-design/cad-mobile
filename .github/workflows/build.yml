@@ -48,7 +48,8 @@ jobs:
           mkdir -p "$DEST"
           cp -r "$(dirname "$IDX")"/. "$DEST"/
           cp web-extras/android-bridge.js "$DEST"/
-          sed -i '0,/<head[^>]*>/s//&\n<script src="android-bridge.js"><\/script>/' "$DEST/index.html"
+          cp web-extras/pen-support.js "$DEST"/
+          sed -i '0,/<head[^>]*>/s//&\n<script src="android-bridge.js"><\/script>\n<script src="pen-support.js"><\/script>/' "$DEST/index.html"
           grep -n "android-bridge.js" "$DEST/index.html"
 
       - name: Decode signing key (optional)
